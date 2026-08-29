@@ -1,0 +1,135 @@
+-- KRONOS 360 - SCHEMA V3.1 PRIMER NIVEL
+-- Ejecutar en Supabase SQL Editor
+
+-- TIPOS
+create type public.app_role as enum ('superadmin','usuario','demo');
+create type public.account_status as enum ('active','suspended','revoked');
+create type public.license_status as enum ('active','past_due','suspended','revoked','expired');
+
+-- TABLAS
+create table public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  email text not null,
+  full_name text,
+  role public.app_role not null default 'usuario',
+  status public.account_status not null default 'active',
+  demo_expires_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.folios (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references public.profiles(id) on delete cascade,
+  folio text unique not null,
+  hash text not null,
+  status text not null default 'ORIGINAL',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint folio_format_check check (folio ~ '^KRN-[0-9]{4}-[0-9]{4}$'),
+  constraint sha256_format_check check (hash ~ '^[0-9a-fA-F]{64}$')
+);
+
+create table public.audit_events (
+  id bigint generated always as identity primary key,
+  event_id uuid not null default gen_random_uuid() unique,
+  actor_id uuid references public.profiles(id) on delete set null,
+  entity_type text not null,
+  entity_id text not null,
+  action text not null,
+  metadata jsonb not null default '{}'::jsonb,
+  previous_hash text,
+  event_hash text not null,
+  created_at timestamptz not null default now()
+);
+
+create table public.licenses (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.profiles(id) on delete cascade,
+  license_key text unique not null,
+  plan text not null default 'demo',
+  status public.license_status not null default 'active',
+  starts_at timestamptz not null default now(),
+  expires_at timestamptz,
+  max_folios integer default 10,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.evidence_packages (
+  id uuid primary key default gen_random_uuid(),
+  folio_id uuid not null references public.folios(id) on delete cascade,
+  package_hash text not null,
+  algorithm text not null default 'SHA-256',
+  standard text default 'NOM-151',
+  storage_reference text,
+  created_at timestamptz not null default now()
+);
+
+-- FUNCIONES SEGURIDAD
+create or replace function public.is_active_user(uid uuid default auth.uid())
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.profiles where id = uid and status = 'active' and (demo_expires_at is null or demo_expires_at > now()));
+$$;
+
+create or replace function public.is_superadmin(uid uuid default auth.uid())
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.profiles where id = uid and role = 'superadmin' and status = 'active');
+$$;
+
+create or replace function public.get_last_event_hash() returns text language sql stable as $$
+  select event_hash from public.audit_events order by id desc limit 1;
+$$;
+
+-- TRIGGER CREACION PERFIL
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into public.profiles (id, email, full_name, role, status)
+  values (new.id, new.email, new.raw_user_meta_data->>'full_name', 'usuario', 'active');
+  return new;
+end; $$;
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created after insert on auth.users for each row execute function public.handle_new_user();
+
+-- UPDATED_AT
+create or replace function public.handle_updated_at() returns trigger language plpgsql as $$
+begin new.updated_at = now(); return new; end; $$;
+create trigger set_profiles_updated_at before update on public.profiles for each row execute function public.handle_updated_at();
+create trigger set_folios_updated_at before update on public.folios for each row execute function public.handle_updated_at();
+
+-- RLS
+alter table public.profiles enable row level security;
+alter table public.folios enable row level security;
+alter table public.audit_events enable row level security;
+alter table public.licenses enable row level security;
+alter table public.evidence_packages enable row level security;
+
+-- POLITICAS PROFILES
+create policy profiles_self_or_admin on public.profiles for select using (id = auth.uid() or public.is_superadmin());
+create policy profiles_admin_update on public.profiles for update using (public.is_superadmin()) with check (public.is_superadmin());
+create policy profiles_admin_insert on public.profiles for insert with check (public.is_superadmin());
+
+-- POLITICAS FOLIOS
+create policy folios_owner_select on public.folios for select using (owner_id = auth.uid() and public.is_active_user() or public.is_superadmin());
+create policy folios_owner_insert on public.folios for insert with check (owner_id = auth.uid() and public.is_active_user() and exists (select 1 from public.profiles where id = auth.uid() and role in ('usuario','superadmin')));
+create policy folios_owner_update on public.folios for update using (owner_id = auth.uid() and public.is_active_user()) with check (owner_id = auth.uid());
+create policy folios_admin_all on public.folios for all using (public.is_superadmin()) with check (public.is_superadmin());
+
+-- AUDITORIA: NO UPDATE/DELETE PARA AUTHENTICATED
+create policy audit_admin_read on public.audit_events for select using (public.is_superadmin() or actor_id = auth.uid());
+create policy audit_insert_active on public.audit_events for insert with check (actor_id = auth.uid() and public.is_active_user());
+revoke update, delete on public.audit_events from authenticated;
+
+-- LICENCIAS
+create policy licenses_owner_select on public.licenses for select using (account_id = auth.uid() or public.is_superadmin());
+create policy licenses_admin_all on public.licenses for all using (public.is_superadmin()) with check (public.is_superadmin());
+
+-- EVIDENCIAS
+create policy evidence_owner_select on public.evidence_packages for select using (exists (select 1 from public.folios where folios.id = evidence_packages.folio_id and folios.owner_id = auth.uid()) or public.is_superadmin());
+
+-- INDICES
+create index idx_folios_owner on public.folios(owner_id);
+create index idx_folios_folio on public.folios(folio);
+create index idx_audit_actor on public.audit_events(actor_id);
+create index idx_audit_entity on public.audit_events(entity_type, entity_id);

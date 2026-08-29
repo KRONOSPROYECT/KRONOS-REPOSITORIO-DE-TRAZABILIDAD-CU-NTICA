@@ -1,2 +1,6 @@
-// Firma offline Ed25519 - Llave nunca expuesta
-export function signOffline(payload: string): string { return `SIGNED_${payload.slice(0,10)}_OFFLINE` }
+export function signOffline(payload: string): string { 
+  return `OFFLINE-SIG_${payload.slice(0,16)}_${Date.now()}` 
+}
+export function verifyOffline(payload: string, sig: string): boolean {
+  return sig.startsWith("OFFLINE-SIG_")
+}

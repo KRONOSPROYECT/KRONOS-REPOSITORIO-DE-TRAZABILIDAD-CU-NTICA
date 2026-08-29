@@ -1,0 +1,30 @@
+import { createServerClient } from '@supabase/ssr'
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export async function middleware(req: NextRequest) {
+  let res = NextResponse.next()
+  const supabase = createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
+    cookies: { get(n){return req.cookies.get(n)?.value}, set(n,v,o){res.cookies.set({name:n,value:v,...o})}, remove(n,o){res.cookies.set({name:n,value:'',...o})} }
+  })
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user && (req.nextUrl.pathname.startsWith('/dashboard') || req.nextUrl.pathname.startsWith('/admin'))) {
+    return NextResponse.redirect(new URL('/login', req.url))
+  }
+  if (user) {
+    const { data: profile } = await supabase.from('profiles').select('status, role, demo_expires_at').eq('id', user.id).single()
+    if (!profile || profile.status!== 'active') {
+      await supabase.auth.signOut()
+      return NextResponse.redirect(new URL('/login?error=suspended', req.url))
+    }
+    if (profile.demo_expires_at && new Date(profile.demo_expires_at) < new Date()) {
+      await supabase.auth.signOut()
+      return NextResponse.redirect(new URL('/login?error=expired', req.url))
+    }
+    if (req.nextUrl.pathname.startsWith('/admin') && profile.role!== 'superadmin') {
+      return NextResponse.redirect(new URL('/dashboard', req.url))
+    }
+  }
+  return res
+}
+export const config = { matcher: ['/dashboard/:path*','/admin/:path*','/api/register/:path*','/api/guardian/:path*'] }

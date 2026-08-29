@@ -1,0 +1,25 @@
+-- Copia todo este bloque en Supabase > SQL Editor > Run
+create extension if not exists pgcrypto;
+do $$ begin create type public.app_role as enum ('superadmin','usuario','demo'); exception when duplicate_object then null; end $$;
+do $$ begin create type public.account_status as enum ('active','suspended','revoked'); exception when duplicate_object then null; end $$;
+
+create table if not exists public.profiles (id uuid primary key references auth.users(id) on delete cascade, email text not null, full_name text, role public.app_role not null default 'usuario', status public.account_status not null default 'active', demo_expires_at timestamptz, created_at timestamptz default now(), updated_at timestamptz default now());
+create table if not exists public.folios (id uuid primary key default gen_random_uuid(), owner_id uuid not null references public.profiles(id) on delete cascade, folio text unique not null, hash text not null, status text not null default 'ORIGINAL', created_at timestamptz default now(), updated_at timestamptz default now(), constraint folio_format_check check (folio ~ '^KRN-[0-9]{4}-[0-9]{4}$'), constraint hash_format_check check (hash ~ '^[0-9a-fA-F]{64}$'));
+create table if not exists public.audit_events (id bigint generated always as identity primary key, event_id uuid not null default gen_random_uuid() unique, actor_id uuid references public.profiles(id) on delete set null, entity_type text not null, entity_id text not null, action text not null, metadata jsonb default '{}', previous_hash text, event_hash text not null, created_at timestamptz default now());
+create table if not exists public.licenses (id uuid primary key default gen_random_uuid(), account_id uuid not null references public.profiles(id) on delete cascade, license_key text unique not null, plan text default 'demo', status text default 'active', starts_at timestamptz default now(), expires_at timestamptz, max_folios integer, created_at timestamptz default now(), updated_at timestamptz default now());
+
+create index if not exists profiles_role_status_idx on public.profiles(role, status);
+create index if not exists folios_owner_created_idx on public.folios(owner_id, created_at desc);
+create index if not exists audit_entity_idx on public.audit_events(entity_type, entity_id, created_at desc);
+
+create or replace function public.is_active_user(uid uuid default auth.uid()) returns boolean language sql stable security definer set search_path=public as $$ select exists (select 1 from public.profiles where id=uid and status='active' and (demo_expires_at is null or demo_expires_at>now())); $$;
+create or replace function public.is_superadmin(uid uuid default auth.uid()) returns boolean language sql stable security definer set search_path=public as $$ select exists (select 1 from public.profiles where id=uid and role='superadmin' and status='active'); $$;
+create or replace function public.handle_new_user() returns trigger language plpgsql security definer set search_path=public as $$ begin insert into public.profiles(id,email,full_name,role,status) values (new.id,coalesce(new.email,''),new.raw_user_meta_data->>'full_name','usuario','active') on conflict(id) do update set email=excluded.email, updated_at=now(); return new; end; $$;
+drop trigger if exists on_auth_user_created on auth.users; create trigger on_auth_user_created after insert on auth.users for each row execute procedure public.handle_new_user();
+
+alter table public.profiles enable row level security; alter table public.folios enable row level security; alter table public.audit_events enable row level security; alter table public.licenses enable row level security;
+drop policy if exists profiles_select_self_or_admin on public.profiles; create policy profiles_select_self_or_admin on public.profiles for select using (id=auth.uid() or public.is_superadmin());
+drop policy if exists folios_select_owner_or_admin on public.folios; create policy folios_select_owner_or_admin on public.folios for select using ((owner_id=auth.uid() and public.is_active_user()) or public.is_superadmin());
+drop policy if exists folios_insert_authorized on public.folios; create policy folios_insert_authorized on public.folios for insert with check (owner_id=auth.uid() and public.is_active_user() and exists(select 1 from public.profiles where id=auth.uid() and role in ('usuario','superadmin')));
+drop policy if exists audit_select_owner_or_admin on public.audit_events; create policy audit_select_owner_or_admin on public.audit_events for select using (actor_id=auth.uid() or public.is_superadmin());
+revoke update, delete on public.audit_events from authenticated;

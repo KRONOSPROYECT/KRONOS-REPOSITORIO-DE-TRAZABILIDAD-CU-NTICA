@@ -1,0 +1,9 @@
+import { createClient } from '@supabase/supabase-js'
+const supabaseAdmin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
+export async function createAuditEvent(actor_id: string, entity_type: string, entity_id: string, action: string, metadata: any = {}){
+  const { data: last } = await supabaseAdmin.from('audit_events').select('event_hash').orderBy('id',{ascending:false}).limit(1).single()
+  const previous_hash = last?.event_hash || null
+  const raw = `${actor_id}${entity_type}${entity_id}${action}${JSON.stringify(metadata)}${previous_hash}${new Date().toISOString()}`
+  const event_hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw)).then(b=>Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join(''))
+  return supabaseAdmin.from('audit_events').insert({ actor_id, entity_type, entity_id, action, metadata, previous_hash, event_hash })
+}

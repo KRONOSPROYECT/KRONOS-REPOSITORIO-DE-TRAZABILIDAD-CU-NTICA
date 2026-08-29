@@ -1,4 +1,7 @@
-// KERNEL OFFLINE 72 - PROPIEDAD INTELECTUAL - SafeCreative 2607146379465
-// Este archivo en producción se compila y sella. No contiene lógica en el repo público.
-export function kernel72Verify(hash: string): boolean { return hash.length === 64 }
-export const KERNEL_VERSION = "72-MKIII-OFFLINE"
+// KERNEL OFFLINE 72 - IP PROTEGIDA - SafeCreative 2607086319439
+// Repo público = solo interfaz. Lógica real en build sellado.
+export function kernel72Verify(hash: string): boolean { 
+  return /^[a-f0-9]{64}$/.test(hash) 
+}
+export const KERNEL_VERSION = "72-MKIII-OFFLINE-SEALED"
+export const KERNEL_HASHES = 72
